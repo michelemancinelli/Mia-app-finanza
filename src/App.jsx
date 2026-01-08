@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+// src/App.jsx
+import React, { useEffect, useState } from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -16,615 +17,102 @@ import {
   Download,
 } from "lucide-react";
 
-/* =========================
-   CONFIG
-========================= */
-const YEAR_START = 2025;
-const YEAR_END = 2040;
+import { useFinanceModel } from "./finance/useFinanceModel";
+import {
+  months,
+  shortMonths,
+  INCOME_ITEM_LABEL,
+  INCOME_ITEM_NAME,
+  formatMoney,
+  calcGroupTotals,
+} from "./finance/utils";
+import { Modal, BudgetInput, MonthBtn, KpiCompact, TotalsBarCompact } from "./finance/ui";
 
-const months = [
-  "Gennaio",
-  "Febbraio",
-  "Marzo",
-  "Aprile",
-  "Maggio",
-  "Giugno",
-  "Luglio",
-  "Agosto",
-  "Settembre",
-  "Ottobre",
-  "Novembre",
-  "Dicembre",
-];
-const shortMonths = ["Gen", "Feb", "Mar", "Apr", "Mag", "Giu", "Lug", "Ago", "Set", "Ott", "Nov", "Dic"];
-
-const INCOME_ITEM_NAME = "__TOTALE__";
-const INCOME_ITEM_LABEL = "Stipendio";
+import { supabase } from "./lib/supabaseClient";
+import Login from "./Login";
 
 /* =========================
-   HELPERS
+   Finance App (la tua UI)
 ========================= */
-function formatMoney(val) {
-  return new Intl.NumberFormat("it-IT", { style: "currency", currency: "EUR" }).format(Number(val) || 0);
-}
-function sumArr(arr) {
-  return (arr || []).reduce((a, b) => a + (Number(b) || 0), 0);
-}
-function isoToday() {
-  return new Date().toISOString().split("T")[0];
-}
-function safeParse(json, fallback) {
-  try {
-    return JSON.parse(json);
-  } catch {
-    return fallback;
-  }
-}
-function clampYear(y) {
-  const ny = Number(y);
-  if (!Number.isFinite(ny)) return YEAR_START;
-  return Math.min(YEAR_END, Math.max(YEAR_START, ny));
-}
-
-function zeroizeLike(list, isIncome = false) {
-  return (list || []).map((it) => ({
-    group: it.group,
-    name: isIncome ? INCOME_ITEM_NAME : it.name,
-    budget: Array(12).fill(0),
-    baseActual: Array(12).fill(0),
-  }));
-}
-
-/* =========================
-   App
-========================= */
-export default function App() {
-  const [currentYear, setCurrentYear] = useState(YEAR_START);
-  const [currentMonthView, setCurrentMonthView] = useState(new Date().getMonth()); // 0..11 (12 = annual)
-
-  const [expenseData, setExpenseData] = useState([]);
-  const [incomeData, setIncomeData] = useState([]);
-  const [transactions, setTransactions] = useState([]);
-
-  const [collapsed, setCollapsed] = useState({}); // `${type}|${group}` -> bool
-
-  // Modals
-  const [alertOpen, setAlertOpen] = useState(false);
-  const [alertMsg, setAlertMsg] = useState("Messaggio");
-
-  const [confirmOpen, setConfirmOpen] = useState(false);
-  const confirmRef = useRef({ onConfirm: null });
-
-  const [manageOpen, setManageOpen] = useState(false);
-  const [manageType, setManageType] = useState("expense"); // expense | income
-  const [manageEditIndex, setManageEditIndex] = useState(-1);
-  const [manageCategory, setManageCategory] = useState("");
-  const [manageName, setManageName] = useState(""); // only expense
-  const manageNameRef = useRef(null);
-
-  const [transactionOpen, setTransactionOpen] = useState(false);
-  const [transForm, setTransForm] = useState({
-    id: "",
-    type: "expense",
-    date: isoToday(),
-    group: "",
-    name: "",
-    amount: "",
-    note: "",
-  });
-
-  const [detailOpen, setDetailOpen] = useState(false);
-  const [detailCtx, setDetailCtx] = useState(null); // {type, group, name, monthIndex}
-
-  const [reportOpen, setReportOpen] = useState(false);
-
-  const didInit = useRef(false);
-
-  const anyModalOpen = alertOpen || confirmOpen || manageOpen || transactionOpen || detailOpen || reportOpen;
-  useEffect(() => {
-    if (anyModalOpen) document.body.classList.add("modal-active");
-    else document.body.classList.remove("modal-active");
-  }, [anyModalOpen]);
-
-  // init
-  useEffect(() => {
-    const storedYear = localStorage.getItem("fm_current_year");
-    const finalYear = clampYear(storedYear ?? YEAR_START);
-    setCurrentYear(finalYear);
-
-    const loaded = loadYearData(finalYear);
-    setExpenseData(Array.isArray(loaded.expenseData) ? loaded.expenseData : []);
-    setIncomeData(normalizeIncomeData(Array.isArray(loaded.incomeData) ? loaded.incomeData : []));
-    setTransactions(Array.isArray(loaded.transactions) ? loaded.transactions : []);
-
-    didInit.current = true;
-  }, []);
-
-  // save
-  useEffect(() => {
-    if (!didInit.current) return;
-    saveYearData(currentYear, { expenseData, incomeData, transactions });
-  }, [currentYear, expenseData, incomeData, transactions]);
-
-  function showAlert(msg) {
-    setAlertMsg(msg || "Messaggio");
-    setAlertOpen(true);
-  }
-  function showConfirm(onConfirm) {
-    confirmRef.current.onConfirm = onConfirm;
-    setConfirmOpen(true);
-  }
-
-  function changeYear(newYear) {
-    const ny = clampYear(newYear);
-
-    saveYearData(currentYear, { expenseData, incomeData, transactions });
-
-    localStorage.setItem("fm_current_year", String(ny));
-    const loaded = loadYearData(ny);
-
-    const loadedExpense = Array.isArray(loaded.expenseData) ? loaded.expenseData : [];
-    const loadedIncome = Array.isArray(loaded.incomeData) ? loaded.incomeData : [];
-    const loadedTx = Array.isArray(loaded.transactions) ? loaded.transactions : [];
-
-    const nextExpense =
-      loadedExpense.length > 0 ? loadedExpense : expenseData.length > 0 ? zeroizeLike(expenseData, false) : [];
-    const nextIncomeRaw =
-      loadedIncome.length > 0 ? loadedIncome : incomeData.length > 0 ? zeroizeLike(incomeData, true) : [];
-    const nextIncome = normalizeIncomeData(nextIncomeRaw);
-
-    setCurrentYear(ny);
-    setExpenseData(nextExpense);
-    setIncomeData(nextIncome);
-    setTransactions(loadedTx.length > 0 ? loadedTx : loadedExpense.length > 0 || loadedIncome.length > 0 ? loadedTx : []);
-    setCollapsed({});
-  }
-
-  function askResetYearTotals() {
-    showConfirm(() => {
-      setExpenseData((prev) => prev.map((it) => ({ ...it, budget: Array(12).fill(0), baseActual: Array(12).fill(0) })));
-      setIncomeData((prev) =>
-        normalizeIncomeData(prev.map((it) => ({ ...it, budget: Array(12).fill(0), baseActual: Array(12).fill(0) })))
-      );
-      setTransactions([]);
-      showAlert("Reset completato. Celle azzerate.");
-    });
-  }
-
-  function toggleGroup(type, group) {
-    const key = `${type}|${group}`;
-    setCollapsed((prev) => ({ ...prev, [key]: !prev[key] }));
-  }
-  function isCollapsed(type, group) {
-    return !!collapsed[`${type}|${group}`];
-  }
-
-  function getTotalActual(type, group, name, monthIndex) {
-    const list = type === "expense" ? expenseData : incomeData;
-    const item = list.find((i) => i.group === group && i.name === name);
-    if (!item) return 0;
-
-    let val = Number(item.baseActual?.[monthIndex] || 0);
-    const related = transactions.filter((t) => {
-      const d = new Date(t.date);
-      return t.type === type && t.group === group && t.name === name && d.getMonth() === monthIndex;
-    });
-    for (const t of related) val += Number(t.amount || 0);
-    return val;
-  }
-
-  function getItemBudget(item) {
-    if (currentMonthView === 12) return sumArr(item.budget);
-    return Number(item.budget?.[currentMonthView] || 0);
-  }
-  function getItemActual(type, item) {
-    if (currentMonthView === 12) {
-      let tot = 0;
-      for (let m = 0; m < 12; m++) tot += getTotalActual(type, item.group, item.name, m);
-      return tot;
-    }
-    return getTotalActual(type, item.group, item.name, currentMonthView);
-  }
-
-  function updateBudget(type, itemIndex, value) {
-    if (currentMonthView === 12) return;
-    const v = Number(value) || 0;
-
-    if (type === "expense") {
-      setExpenseData((prev) => {
-        const next = [...prev];
-        const item = { ...next[itemIndex] };
-        const b = [...(item.budget || Array(12).fill(0))];
-        b[currentMonthView] = v;
-        item.budget = b;
-        next[itemIndex] = item;
-        return next;
-      });
-    } else {
-      setIncomeData((prev) => {
-        const next = [...prev];
-        const item = { ...next[itemIndex] };
-        const b = [...(item.budget || Array(12).fill(0))];
-        b[currentMonthView] = v;
-        item.budget = b;
-        next[itemIndex] = item;
-        return normalizeIncomeData(next);
-      });
-    }
-  }
-
-  function openAddCategoryModal(type = "expense") {
-    setManageOpen(true);
-    setManageType(type);
-    setManageEditIndex(-1);
-    setManageCategory("");
-    setManageName("");
-    setTimeout(() => manageNameRef.current?.focus?.(), 50);
-  }
-  function quickAddSubItem(group) {
-    setManageOpen(true);
-    setManageType("expense");
-    setManageEditIndex(-1);
-    setManageCategory(group);
-    setManageName("");
-    setTimeout(() => manageNameRef.current?.focus?.(), 60);
-  }
-  function switchManageType(type) {
-    setManageType(type);
-    setManageEditIndex(-1);
-    setManageCategory("");
-    setManageName("");
-  }
-  function getManageList() {
-    return manageType === "expense" ? expenseData : incomeData;
-  }
-
-  function saveManagedItem() {
-    const group = manageCategory.trim();
-    if (!group) return showAlert("Inserisci la categoria");
-
-    const name = manageType === "income" ? INCOME_ITEM_NAME : manageName.trim();
-    if (manageType === "expense" && !name) return showAlert("Inserisci anche la sottocategoria");
-
-    const list = getManageList();
-    const exists = list.find((it, i) => {
-      if (i === manageEditIndex) return false;
-      if (manageType === "income") return it.group.toLowerCase() === group.toLowerCase();
-      return it.group.toLowerCase() === group.toLowerCase() && it.name.toLowerCase() === name.toLowerCase();
-    });
-    if (exists) return showAlert("Esiste già.");
-
-    const applyUpdate = (setter) => {
-      setter((prev) => {
-        const next = [...prev];
-
-        if (manageEditIndex > -1) {
-          const old = next[manageEditIndex];
-          const oldGroup = old.group;
-          const oldName = old.name;
-
-          next[manageEditIndex] = { ...old, group, name };
-
-          setTransactions((txPrev) =>
-            txPrev.map((t) => {
-              if (t.type !== manageType) return t;
-              if (manageType === "income") {
-                return t.group === oldGroup ? { ...t, group, name: INCOME_ITEM_NAME } : t;
-              }
-              return t.group === oldGroup && t.name === oldName ? { ...t, group, name } : t;
-            })
-          );
-        } else {
-          next.push({
-            group,
-            name,
-            budget: Array(12).fill(0),
-            baseActual: Array(12).fill(0),
-          });
-        }
-
-        return manageType === "income" ? normalizeIncomeData(next) : next;
-      });
-    };
-
-    if (manageType === "expense") applyUpdate(setExpenseData);
-    else applyUpdate(setIncomeData);
-
-    setManageEditIndex(-1);
-    setManageName("");
-    if (manageType === "expense") setTimeout(() => manageNameRef.current?.focus?.(), 60);
-  }
-
-  function editManagedItem(index) {
-    const list = getManageList();
-    const item = list[index];
-    if (!item) return;
-    setManageCategory(item.group);
-    setManageName(manageType === "income" ? "" : item.name);
-    setManageEditIndex(index);
-    if (manageType === "expense") setTimeout(() => manageNameRef.current?.focus?.(), 60);
-  }
-
-  function askDeleteManagedItem(index) {
-    showConfirm(() => {
-      if (manageType === "expense") {
-        setExpenseData((prev) => prev.filter((_, i) => i !== index));
-      } else {
-        const item = incomeData[index];
-        setIncomeData((prev) => normalizeIncomeData(prev.filter((_, i) => i !== index)));
-        if (item?.group) {
-          setTransactions((prev) => prev.filter((t) => !(t.type === "income" && t.group === item.group)));
-        }
-      }
-    });
-  }
-
-  function openTransactionModal(type, preGroup, preName) {
-    const list = type === "income" ? incomeData : expenseData;
-    const groups = [...new Set(list.map((i) => i.group))];
-    const group = preGroup || groups[0] || "";
-
-    if (type === "income") {
-      setTransForm({
-        id: "",
-        type,
-        date: isoToday(),
-        group,
-        name: INCOME_ITEM_NAME,
-        amount: "",
-        note: "",
-      });
-      setTransactionOpen(true);
-      return;
-    }
-
-    const items = list.filter((i) => i.group === group);
-    const name = preName || items[0]?.name || "";
-
-    setTransForm({
-      id: "",
-      type,
-      date: isoToday(),
-      group,
-      name,
-      amount: "",
-      note: "",
-    });
-    setTransactionOpen(true);
-  }
-
-  function saveTransaction() {
-    const amount = Number(transForm.amount);
-    if (!amount || Number.isNaN(amount)) return showAlert("Inserisci importo");
-    if (!transForm.date) return showAlert("Data mancante");
-    if (!transForm.group) return showAlert("Categoria mancante");
-
-    const finalName = transForm.type === "income" ? INCOME_ITEM_NAME : transForm.name;
-    if (transForm.type === "expense" && !finalName) return showAlert("Sottocategoria mancante");
-
-    const payload = {
-      id: transForm.id ? Number(transForm.id) : Date.now(),
-      type: transForm.type,
-      group: transForm.group,
-      name: finalName,
-      date: transForm.date,
-      amount,
-      note: transForm.note || "",
-    };
-
-    setTransactions((prev) => {
-      const existsIdx = prev.findIndex((t) => t.id === payload.id);
-      if (existsIdx >= 0) {
-        const next = [...prev];
-        next[existsIdx] = payload;
-        return next;
-      }
-      return [...prev, payload];
-    });
-
-    setTransactionOpen(false);
-  }
-
-  function openDetailModal(type, group, name, monthIndex) {
-    setDetailCtx({ type, group, name, monthIndex });
-    setDetailOpen(true);
-  }
-  function deleteTrans(id) {
-    showConfirm(() => setTransactions((prev) => prev.filter((t) => t.id !== id)));
-  }
-  function editTrans(id) {
-    const t = transactions.find((x) => x.id === id);
-    if (!t) return;
-    setTransForm({
-      id: String(t.id),
-      type: t.type,
-      date: t.date,
-      group: t.group,
-      name: t.type === "income" ? INCOME_ITEM_NAME : t.name,
-      amount: String(t.amount),
-      note: t.note || "",
-    });
-    setTransactionOpen(true);
-  }
-
-  const groupedExpenses = useMemo(() => groupByGroup(expenseData), [expenseData]);
-  const groupedIncome = useMemo(() => groupByGroup(incomeData), [incomeData]);
-
-  const monthLabel = currentMonthView === 12 ? "Totale anno" : months[currentMonthView];
-
-  const footerTotals = useMemo(() => {
-    const calcTotals = (type, list) => {
-      let bud = 0;
-      let act = 0;
-
-      list.forEach((item) => {
-        bud += currentMonthView === 12 ? sumArr(item.budget) : Number(item.budget?.[currentMonthView] || 0);
-
-        if (currentMonthView === 12) {
-          let t = 0;
-          for (let m = 0; m < 12; m++) t += getTotalActual(type, item.group, item.name, m);
-          act += t;
-        } else {
-          act += getTotalActual(type, item.group, item.name, currentMonthView);
-        }
-      });
-
-      return { bud, act };
-    };
-
-    const exp = calcTotals("expense", expenseData);
-    const inc = calcTotals("income", incomeData);
-
-    return {
-      expBud: exp.bud,
-      expAct: exp.act,
-      incBud: inc.bud,
-      incAct: inc.act,
-      netBud: inc.bud - exp.bud,
-      netAct: inc.act - exp.act,
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [expenseData, incomeData, transactions, currentMonthView]);
-
-  const yearNetActual = useMemo(() => {
-    let yearExp = 0;
-    let yearInc = 0;
-    for (const it of expenseData) for (let m = 0; m < 12; m++) yearExp += getTotalActual("expense", it.group, it.name, m);
-    for (const it of incomeData) for (let m = 0; m < 12; m++) yearInc += getTotalActual("income", it.group, it.name, m);
-    return yearInc - yearExp;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [expenseData, incomeData, transactions]);
-
-  const yearOptions = useMemo(() => {
-    const arr = [];
-    for (let y = YEAR_START; y <= YEAR_END; y++) arr.push(y);
-    return arr;
-  }, []);
-
-  const transList = transForm.type === "income" ? incomeData : expenseData;
-  const transGroups = useMemo(() => [...new Set(transList.map((i) => i.group))], [transList]);
-  const transItems = useMemo(() => transList.filter((i) => i.group === transForm.group), [transList, transForm.group]);
-
-  useEffect(() => {
-    if (!transactionOpen) return;
-    if (!transForm.group) return;
-
-    if (transForm.type === "income") {
-      if (transForm.name !== INCOME_ITEM_NAME) setTransForm((p) => ({ ...p, name: INCOME_ITEM_NAME }));
-      return;
-    }
-
-    const exists = transItems.some((i) => i.name === transForm.name);
-    if (!exists) setTransForm((p) => ({ ...p, name: transItems[0]?.name || "" }));
-  }, [transForm.group, transItems, transForm.name, transactionOpen, transForm.type]);
-
-  const detailList = useMemo(() => {
-    if (!detailCtx) return { baseVal: 0, rows: [] };
-    const { type, group, name, monthIndex } = detailCtx;
-
-    const list = type === "income" ? incomeData : expenseData;
-    const item = list.find((i) => i.group === group && i.name === name);
-    if (!item) return { baseVal: 0, rows: [] };
-
-    const baseVal = monthIndex === 12 ? sumArr(item.baseActual) : Number(item.baseActual?.[monthIndex] || 0);
-
-    const related = transactions
-      .filter((t) => {
-        const d = new Date(t.date);
-        const m = d.getMonth();
-        const matchMonth = monthIndex === 12 || m === monthIndex;
-        return t.type === type && t.group === group && t.name === name && matchMonth;
-      })
-      .sort((a, b) => new Date(b.date) - new Date(a.date));
-
-    return { baseVal, rows: related };
-  }, [detailCtx, expenseData, incomeData, transactions]);
-
-  // Report (ripristinato come prima: 2 sezioni)
-  const report = useMemo(() => {
-    // mese corrente: se sei su "Totale anno" usa il mese reale
-    const curMonth = currentMonthView === 12 ? new Date().getMonth() : currentMonthView;
-
-    const groups = [...new Set(expenseData.map((i) => i.group))].sort((a, b) => a.localeCompare(b));
-
-    // 1) Riepilogo per Categoria
-    const categorySummary = groups.map((group) => {
-      const items = expenseData.filter((i) => i.group === group);
-
-      const monthTotal = items.reduce((acc, it) => acc + getTotalActual("expense", it.group, it.name, curMonth), 0);
-
-      let yearTotal = 0;
-      for (const it of items) {
-        for (let m = 0; m < 12; m++) yearTotal += getTotalActual("expense", it.group, it.name, m);
-      }
-
-      const avg = yearTotal / 12;
-
-      return { group, monthTotal, yearTotal, avg };
-    });
-
-    // 2) Matrice Annuale Completa (voci)
-    const rows = expenseData
-      .slice()
-      .sort((a, b) => (a.name || "").localeCompare(b.name || "") || (a.group || "").localeCompare(b.group || ""))
-      .map((it) => {
-        const monthVals = Array.from({ length: 12 }, (_, m) => getTotalActual("expense", it.group, it.name, m));
-        const total = monthVals.reduce((a, b) => a + b, 0);
-        return { group: it.group, name: it.name, monthVals, total };
-      });
-
-    return { curMonth, categorySummary, rows };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [expenseData, transactions, currentMonthView]);
+function FinanceApp() {
+  const m = useFinanceModel();
+
+  const {
+    currentYear,
+    currentMonthView,
+    expenseData,
+    incomeData,
+    transactions,
+
+    alertOpen,
+    alertMsg,
+    confirmOpen,
+    manageOpen,
+    manageType,
+    manageEditIndex,
+    manageCategory,
+    manageName,
+    transactionOpen,
+    transForm,
+    detailOpen,
+    detailCtx,
+    reportOpen,
+
+    confirmRef,
+    manageNameRef,
+
+    setCurrentMonthView,
+    setAlertOpen,
+    setConfirmOpen,
+    setManageOpen,
+    setManageCategory,
+    setManageName,
+    setTransactionOpen,
+    setTransForm,
+    setDetailOpen,
+    setReportOpen,
+
+    groupedExpenses,
+    groupedIncome,
+    monthLabel,
+    footerTotals,
+    yearNetActual,
+    yearOptions,
+    transGroups,
+    transItems,
+    detailList,
+    report,
+
+    changeYear,
+    askResetYearTotals,
+    toggleGroup,
+    isCollapsed,
+    getTotalActual,
+    getItemBudget,
+    getItemActual,
+    updateBudget,
+    openAddCategoryModal,
+    quickAddSubItem,
+    switchManageType,
+    getManageList,
+    saveManagedItem,
+    editManagedItem,
+    askDeleteManagedItem,
+    openTransactionModal,
+    saveTransaction,
+    openDetailModal,
+    deleteTrans,
+    editTrans,
+    downloadBackup,
+    restoreBackupFromFile,
+  } = m;
 
   const netIsPositive = footerTotals.netAct >= 0;
-
-  function downloadBackup() {
-    const data = {
-      year: currentYear,
-      expenseData,
-      incomeData,
-      transactions,
-    };
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `backup_piano_finanziario_${currentYear}.json`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-    showAlert("Backup scaricato.");
-  }
-
-  function restoreBackupFromFile(file) {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const parsed = safeParse(String(reader.result || ""), null);
-      if (!parsed) return showAlert("File non valido.");
-      if (!parsed || !Array.isArray(parsed.expenseData) || !Array.isArray(parsed.incomeData) || !Array.isArray(parsed.transactions)) {
-        return showAlert("Backup non compatibile.");
-      }
-
-      setExpenseData(parsed.expenseData);
-      setIncomeData(normalizeIncomeData(parsed.incomeData));
-      setTransactions(parsed.transactions);
-
-      saveYearData(currentYear, {
-        expenseData: parsed.expenseData,
-        incomeData: parsed.incomeData,
-        transactions: parsed.transactions,
-      });
-
-      showAlert("Backup ripristinato.");
-    };
-    reader.readAsText(file);
-  }
 
   return (
     <div className="min-h-screen bg-[#F6F7FB] text-slate-900">
       <style>{`
+        hookup;
         body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; }
         body.modal-active { overflow-y: hidden; }
         * { -webkit-tap-highlight-color: transparent; }
@@ -744,7 +232,9 @@ export default function App() {
         <div className="max-w-6xl mx-auto px-4 py-4">
           <div className="flex items-center justify-between gap-3">
             <div className="min-w-0 flex items-center gap-2">
-              <div className="text-[18px] sm:text-[22px] font-extrabold tracking-tight truncate">Piano Finanziario</div>
+              <div className="text-[18px] sm:text-[22px] font-extrabold tracking-tight truncate">
+                Piano Finanziario
+              </div>
 
               <div className="relative shrink-0">
                 <select className="lux-select" value={currentYear} onChange={(e) => changeYear(e.target.value)}>
@@ -810,14 +300,26 @@ export default function App() {
 
         <div className="lux-card mt-3 p-3 sm:p-4">
           <div className="grid grid-cols-6 gap-2">
-            {shortMonths.slice(0, 6).map((m, idx) => (
-              <MonthBtn key={m} label={m} active={currentMonthView === idx} onClick={() => setCurrentMonthView(idx)} />
+            {shortMonths.slice(0, 6).map((mLabel, idx) => (
+              <MonthBtn
+                key={mLabel}
+                label={mLabel}
+                active={currentMonthView === idx}
+                onClick={() => setCurrentMonthView(idx)}
+              />
             ))}
           </div>
           <div className="grid grid-cols-6 gap-2 mt-2">
-            {shortMonths.slice(6, 12).map((m, i) => {
+            {shortMonths.slice(6, 12).map((mLabel, i) => {
               const idx = i + 6;
-              return <MonthBtn key={m} label={m} active={currentMonthView === idx} onClick={() => setCurrentMonthView(idx)} />;
+              return (
+                <MonthBtn
+                  key={mLabel}
+                  label={mLabel}
+                  active={currentMonthView === idx}
+                  onClick={() => setCurrentMonthView(idx)}
+                />
+              );
             })}
           </div>
 
@@ -850,7 +352,9 @@ export default function App() {
           {/* USCITE */}
           <div className="space-y-3">
             <div className="flex items-center justify-between">
-              <div className="text-[12px] font-extrabold tracking-wider text-slate-500 uppercase">Uscite</div>
+              <div className="text-[12px] font-extrabold tracking-wider text-slate-500 uppercase">
+                Uscite
+              </div>
               <div className="text-[12px] text-slate-500 font-extrabold nowrap tabnums">
                 <span className="mr-2">Uscite</span>
                 <span className="text-slate-900">{formatMoney(footerTotals.expAct)}</span>
@@ -859,7 +363,10 @@ export default function App() {
 
             {Object.keys(groupedExpenses).length === 0 ? (
               <div className="lux-card p-5 text-slate-600 text-sm font-semibold">
-                <button className="font-extrabold text-indigo-700 hover:underline" onClick={() => openAddCategoryModal("expense")}>
+                <button
+                  className="font-extrabold text-indigo-700 hover:underline"
+                  onClick={() => openAddCategoryModal("expense")}
+                >
                   Aggiungi Categoria
                 </button>
               </div>
@@ -868,7 +375,12 @@ export default function App() {
                 .sort(([a], [b]) => a.localeCompare(b))
                 .map(([group, items]) => {
                   const collapsedNow = isCollapsed("expense", group);
-                  const { groupActual, groupBudget } = calcGroupTotals("expense", items, currentMonthView, getTotalActual);
+                  const { groupActual, groupBudget } = calcGroupTotals(
+                    "expense",
+                    items,
+                    currentMonthView,
+                    getTotalActual
+                  );
 
                   return (
                     <div key={`exp-${group}`} className="lux-card overflow-hidden">
@@ -878,23 +390,38 @@ export default function App() {
                         className="w-full px-4 sm:px-5 py-4 flex items-center justify-between hover:bg-slate-50/60 transition"
                       >
                         <div className="flex items-center gap-3 min-w-0">
-                          <span className={["text-slate-400 transition-transform", collapsedNow ? "" : "rotate-90"].join(" ")}>
+                          <span
+                            className={[
+                              "text-slate-400 transition-transform",
+                              collapsedNow ? "" : "rotate-90",
+                            ].join(" ")}
+                          >
                             <ChevronRight className="w-5 h-5" />
                           </span>
                           <span className="w-2.5 h-2.5 rounded-full bg-indigo-600 shrink-0" />
                           <div className="min-w-0 text-left">
-                            <div className="font-extrabold text-[15px] sm:text-[16px] truncate">{group}</div>
+                            <div className="font-extrabold text-[15px] sm:text-[16px] truncate">
+                              {group}
+                            </div>
                           </div>
                         </div>
 
                         <div className="flex items-center gap-4 sm:gap-6">
                           <div className="text-right">
-                            <div className="text-[10px] uppercase font-extrabold text-slate-400">Uscite</div>
-                            <div className="font-extrabold text-[14px] nowrap tabnums">{formatMoney(groupActual)}</div>
+                            <div className="text-[10px] uppercase font-extrabold text-slate-400">
+                              Uscite
+                            </div>
+                            <div className="font-extrabold text-[14px] nowrap tabnums">
+                              {formatMoney(groupActual)}
+                            </div>
                           </div>
                           <div className="text-right">
-                            <div className="text-[10px] uppercase font-extrabold text-slate-400">Budget</div>
-                            <div className="font-extrabold text-[14px] text-indigo-700 nowrap tabnums">{formatMoney(groupBudget)}</div>
+                            <div className="text-[10px] uppercase font-extrabold text-slate-400">
+                              Budget
+                            </div>
+                            <div className="font-extrabold text-[14px] text-indigo-700 nowrap tabnums">
+                              {formatMoney(groupBudget)}
+                            </div>
                           </div>
                         </div>
                       </button>
@@ -913,37 +440,59 @@ export default function App() {
                               .slice()
                               .sort((a, b) => a.name.localeCompare(b.name))
                               .map((item) => {
-                                const itemIndex = expenseData.findIndex((x) => x.group === item.group && x.name === item.name);
+                                const itemIndex = expenseData.findIndex(
+                                  (x) => x.group === item.group && x.name === item.name
+                                );
                                 const actualVal = getItemActual("expense", item);
                                 const budgetVal = getItemBudget(item);
                                 const diffVal = budgetVal - actualVal;
                                 const diffClass =
-                                  Math.abs(diffVal) < 0.01 ? "text-slate-400" : diffVal >= 0 ? "text-emerald-600" : "text-rose-600";
+                                  Math.abs(diffVal) < 0.01
+                                    ? "text-slate-400"
+                                    : diffVal >= 0
+                                    ? "text-emerald-600"
+                                    : "text-rose-600";
 
                                 const prevSuggestion =
-                                  currentMonthView !== 12 && currentMonthView > 0 && Number(item.budget?.[currentMonthView - 1] || 0) > 0
+                                  currentMonthView !== 12 &&
+                                  currentMonthView > 0 &&
+                                  Number(item.budget?.[currentMonthView - 1] || 0) > 0
                                     ? String(item.budget[currentMonthView - 1])
                                     : "";
-                                const displayValue = currentMonthView !== 12 && budgetVal === 0 ? "" : String(budgetVal);
+                                const displayValue =
+                                  currentMonthView !== 12 && budgetVal === 0 ? "" : String(budgetVal);
 
                                 return (
-                                  <div key={`${item.group}-${item.name}`} className="bg-[#FBFBFE] border border-slate-200/50 rounded-2xl voice-row">
+                                  <div
+                                    key={`${item.group}-${item.name}`}
+                                    className="bg-[#FBFBFE] border border-slate-200/50 rounded-2xl voice-row"
+                                  >
                                     <div className="row-grid">
                                       <div className="min-w-0">
-                                        <div className="font-extrabold text-[13px] sm:text-[14px] truncate">{item.name}</div>
+                                        <div className="font-extrabold text-[13px] sm:text-[14px] truncate">
+                                          {item.name}
+                                        </div>
                                       </div>
 
                                       <div className="min-w-0">
                                         {currentMonthView === 12 ? (
-                                          <div className="plain-num tabnums text-slate-700">{formatMoney(budgetVal)}</div>
+                                          <div className="plain-num tabnums text-slate-700">
+                                            {formatMoney(budgetVal)}
+                                          </div>
                                         ) : (
-                                          <BudgetInput value={displayValue} suggest={prevSuggestion} onChange={(v) => updateBudget("expense", itemIndex, v)} />
+                                          <BudgetInput
+                                            value={displayValue}
+                                            suggest={prevSuggestion}
+                                            onChange={(v) => updateBudget("expense", itemIndex, v)}
+                                          />
                                         )}
                                       </div>
 
                                       <button
                                         type="button"
-                                        onClick={() => openDetailModal("expense", item.group, item.name, currentMonthView)}
+                                        onClick={() =>
+                                          openDetailModal("expense", item.group, item.name, currentMonthView)
+                                        }
                                         className="inline-flex items-center justify-end gap-1.5 hover:underline text-rose-700"
                                         title="Vedi movimenti"
                                       >
@@ -951,7 +500,9 @@ export default function App() {
                                         <Search className="w-4 h-4 opacity-80" />
                                       </button>
 
-                                      <div className={["plain-num tabnums", diffClass].join(" ")}>{formatMoney(diffVal)}</div>
+                                      <div className={["plain-num tabnums", diffClass].join(" ")}>
+                                        {formatMoney(diffVal)}
+                                      </div>
                                     </div>
                                   </div>
                                 );
@@ -977,7 +528,9 @@ export default function App() {
           {/* ENTRATE */}
           <div className="space-y-3 pt-1">
             <div className="flex items-center justify-between">
-              <div className="text-[12px] font-extrabold tracking-wider text-slate-500 uppercase">Entrate</div>
+              <div className="text-[12px] font-extrabold tracking-wider text-slate-500 uppercase">
+                Entrate
+              </div>
               <div className="text-[12px] text-slate-500 font-extrabold nowrap tabnums">
                 <span className="mr-2">Entrate</span>
                 <span className="text-slate-900">{formatMoney(footerTotals.incAct)}</span>
@@ -986,7 +539,10 @@ export default function App() {
 
             {Object.keys(groupedIncome).length === 0 ? (
               <div className="lux-card p-5 text-slate-600 text-sm font-semibold">
-                <button className="font-extrabold text-indigo-700 hover:underline" onClick={() => openAddCategoryModal("income")}>
+                <button
+                  className="font-extrabold text-indigo-700 hover:underline"
+                  onClick={() => openAddCategoryModal("income")}
+                >
                   Aggiungi Categoria
                 </button>
               </div>
@@ -1129,13 +685,7 @@ export default function App() {
       </main>
 
       {/* REPORT */}
-      <Modal
-        open={reportOpen}
-        onClose={() => setReportOpen(false)}
-        z="z-[70]"
-        padding="p-0 sm:p-4"
-        overlayClass="bg-slate-900/80 backdrop-blur-sm"
-      >
+      <Modal open={reportOpen} onClose={() => setReportOpen(false)} z="z-[70]" padding="p-0 sm:p-4" overlayClass="bg-slate-900/80 backdrop-blur-sm">
         <div className="bg-white w-full h-full sm:h-auto sm:max-h-[95vh] sm:max-w-6xl mx-auto rounded-none sm:rounded-2xl shadow-2xl overflow-hidden flex flex-col">
           <div className="bg-slate-900 px-5 py-4 flex justify-between items-center text-white shrink-0">
             <div>
@@ -1195,9 +745,9 @@ export default function App() {
                     <thead className="report-sticky-top bg-slate-50 text-[10px] uppercase text-slate-500 font-extrabold">
                       <tr>
                         <th className="report-sticky-left-head px-4 py-3 text-left min-w-[220px]">Voce</th>
-                        {shortMonths.map((m) => (
-                          <th key={m} className="px-4 py-3 text-right min-w-[90px]">
-                            {m}
+                        {shortMonths.map((mLabel) => (
+                          <th key={mLabel} className="px-4 py-3 text-right min-w-[90px]">
+                            {mLabel}
                           </th>
                         ))}
                         <th className="px-4 py-3 text-right min-w-[110px]">Tot</th>
@@ -1593,193 +1143,27 @@ export default function App() {
 }
 
 /* =========================
-   Components
+   App wrapper (Login Gate)
 ========================= */
-function Modal({ open, onClose, children, z = "z-[60]", padding = "p-4", overlayClass = "bg-slate-900/60 backdrop-blur-sm" }) {
-  if (!open) return null;
-  return (
-    <div className={`fixed inset-0 ${z} flex items-center justify-center ${padding}`}>
-      <div className={`absolute inset-0 ${overlayClass}`} onClick={onClose} />
-      <div className="relative w-full h-full flex items-center justify-center">{children}</div>
-    </div>
-  );
-}
+export default function App() {
+  const [session, setSession] = useState(null);
+  const [loading, setLoading] = useState(true);
 
-function BudgetInput({ value, suggest, onChange }) {
-  const [placeholder, setPlaceholder] = useState("");
-  return (
-    <input
-      type="number"
-      step="0.01"
-      value={value}
-      placeholder={placeholder}
-      onFocus={() => {
-        if (!value && suggest) setPlaceholder(String(suggest));
-      }}
-      onBlur={() => setPlaceholder("")}
-      onChange={(e) => onChange(e.target.value)}
-      className="budget-input tabnums"
-    />
-  );
-}
-
-function MonthBtn({ label, active, onClick }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={[
-        "px-2 py-2 rounded-xl font-extrabold text-[12px] border transition tabnums nowrap",
-        active ? "bg-indigo-600 text-white border-indigo-600" : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50",
-      ].join(" ")}
-      title={label}
-    >
-      {label}
-    </button>
-  );
-}
-
-function KpiCompact({ title, value, valueClass }) {
-  return (
-    <div className="lux-card p-3 sm:p-5">
-      <div className="kpi-title">{title}</div>
-      <div className={["kpi-value tabnums mt-2", valueClass].join(" ")}>{value}</div>
-    </div>
-  );
-}
-
-/* ultime 3 righe: testo più piccolo + cifre più vicine */
-function TotalsBarCompact({ expAct, expBud, incAct, incBud, netAct, netBud, yearNetAct, isAnnual }) {
-  const rightNet = isAnnual ? netAct : yearNetAct;
-  const netColor = rightNet >= 0 ? "text-emerald-400" : "text-rose-300";
-
-  const Grid = ({ children }) => (
-    <div className="grid grid-cols-[1fr_92px_92px_92px] sm:grid-cols-[1fr_180px_180px_130px] gap-1.5 sm:gap-2 items-center">
-      {children}
-    </div>
-  );
-
-  return (
-    <div className="lux-card overflow-hidden mt-2">
-      <div className="divide-y divide-slate-200">
-        <div className="bg-white px-4 sm:px-6 py-3">
-          <Grid>
-            <div className="font-extrabold text-[10px] sm:text-[12px] text-rose-700 uppercase tracking-wide nowrap">TOT. USCITE</div>
-            <div className="text-right font-extrabold text-[12px] sm:text-[16px] text-rose-700 tabnums nowrap">{formatMoney(expAct)}</div>
-            <div className="text-right font-extrabold text-[12px] sm:text-[16px] text-rose-700 tabnums nowrap">{formatMoney(expBud)}</div>
-            <div className="text-right font-extrabold text-[12px] sm:text-[16px] text-slate-400 tabnums nowrap">-</div>
-          </Grid>
-        </div>
-
-        <div className="bg-white px-4 sm:px-6 py-3">
-          <Grid>
-            <div className="font-extrabold text-[10px] sm:text-[12px] text-emerald-700 uppercase tracking-wide nowrap">TOT. ENTRATE</div>
-            <div className="text-right font-extrabold text-[12px] sm:text-[16px] text-emerald-700 tabnums nowrap">{formatMoney(incAct)}</div>
-            <div className="text-right font-extrabold text-[12px] sm:text-[16px] text-emerald-700 tabnums nowrap">{formatMoney(incBud)}</div>
-            <div className="text-right font-extrabold text-[12px] sm:text-[16px] text-slate-400 tabnums nowrap">-</div>
-          </Grid>
-        </div>
-
-        <div className="bg-slate-900 px-4 sm:px-6 py-3">
-          <Grid>
-            <div className="font-extrabold text-[10px] sm:text-[13px] text-white uppercase tracking-wide nowrap">RIMANENZA</div>
-            <div className="text-right font-extrabold text-[12px] sm:text-[16px] text-white/70 tabnums nowrap">{formatMoney(netAct)}</div>
-            <div className="text-right font-extrabold text-[12px] sm:text-[16px] text-white tabnums nowrap">{formatMoney(netBud)}</div>
-            <div className={["text-right font-extrabold text-[13px] sm:text-[18px] tabnums nowrap", netColor].join(" ")}>
-              {formatMoney(rightNet)}
-            </div>
-          </Grid>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* =========================
-   Data helpers
-========================= */
-function groupByGroup(items) {
-  const out = {};
-  for (const it of items || []) {
-    const g = it.group || "Senza categoria";
-    if (!out[g]) out[g] = [];
-    out[g].push(it);
-  }
-  return out;
-}
-
-function calcGroupTotals(type, items, currentMonthView, getTotalActual) {
-  let groupBudget = 0;
-  let groupActual = 0;
-
-  for (const it of items) {
-    const budgetVal = currentMonthView === 12 ? sumArr(it.budget) : Number(it.budget?.[currentMonthView] || 0);
-    groupBudget += budgetVal;
-
-    if (currentMonthView === 12) {
-      let tot = 0;
-      for (let m = 0; m < 12; m++) tot += getTotalActual(type, it.group, it.name, m);
-      groupActual += tot;
-    } else {
-      groupActual += getTotalActual(type, it.group, it.name, currentMonthView);
-    }
-  }
-
-  return { groupBudget, groupActual };
-}
-
-function normalizeIncomeData(arr) {
-  const input = Array.isArray(arr) ? arr : [];
-  const byGroup = new Map();
-
-  for (const it of input) {
-    if (!it?.group) continue;
-    const group = String(it.group);
-    if (!byGroup.has(group)) byGroup.set(group, []);
-    byGroup.get(group).push(it);
-  }
-
-  const out = [];
-  for (const [group, items] of byGroup.entries()) {
-    const existing = items.find((x) => x.name === INCOME_ITEM_NAME) || items[0];
-    out.push({
-      group,
-      name: INCOME_ITEM_NAME,
-      budget: Array.isArray(existing?.budget) ? existing.budget : Array(12).fill(0),
-      baseActual: Array.isArray(existing?.baseActual) ? existing.baseActual : Array(12).fill(0),
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+      setLoading(false);
     });
-  }
 
-  return out;
-}
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+    });
 
-/* =========================
-   Storage
-========================= */
-function loadYearData(year) {
-  const key = `fm_data_${year}`;
-  const json = localStorage.getItem(key);
+    return () => subscription.unsubscribe();
+  }, []);
 
-  if (json) {
-    const data = safeParse(json, { expenseData: [], incomeData: [], transactions: [] });
-    return {
-      expenseData: Array.isArray(data.expenseData) ? data.expenseData : [],
-      incomeData: Array.isArray(data.incomeData) ? data.incomeData : [],
-      transactions: Array.isArray(data.transactions) ? data.transactions : [],
-    };
-  }
+  if (loading) return null;
+  if (!session) return <Login />;
 
-  const payload = { expenseData: [], incomeData: [], transactions: [] };
-  localStorage.setItem(key, JSON.stringify(payload));
-  return payload;
-}
-
-function saveYearData(year, payload) {
-  const key = `fm_data_${year}`;
-  const safePayload = {
-    expenseData: Array.isArray(payload.expenseData) ? payload.expenseData : [],
-    incomeData: Array.isArray(payload.incomeData) ? payload.incomeData : [],
-    transactions: Array.isArray(payload.transactions) ? payload.transactions : [],
-  };
-  localStorage.setItem(key, JSON.stringify(safePayload));
+  return <FinanceApp />;
 }
